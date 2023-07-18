@@ -27,7 +27,7 @@ import time
 import warnings
 import os
 from paho.mqtt import client as mqtt_client
-from from dotenv import load_dotenv
+from dotenv import load_dotenv
 
 # MQTT Parameters
 FIRST_RECONNECT_DELAY = 1
