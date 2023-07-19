@@ -32,13 +32,13 @@ from dotenv import load_dotenv
 # MQTT Parameters
 FIRST_RECONNECT_DELAY = 1
 RECONNECT_RATE = 2
-MAX_RECONNECT_COUNT = 12
-MAX_RECONNECT_DELAY = 60
+MAX_RECONNECT_COUNT = 100
+MAX_RECONNECT_DELAY = 10
 
 # Image Parameters
 lk_params = dict( winSize  = (20,20),
-                maxLevel = 2,
-                criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
+                maxLevel = 0,
+                criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.01))
 blur_params = (5,5)
 dilation_params = (5, 5)
 movment_threshold = 2
@@ -67,23 +67,23 @@ def connect_mqtt(broker, port):
     return client
 
 def on_disconnect(client, userdata, rc):
-    logging.info("Disconnected with result code: %s", rc)
+    print("Disconnected with result code: %s", rc)
     reconnect_count, reconnect_delay = 0, FIRST_RECONNECT_DELAY
     while reconnect_count < MAX_RECONNECT_COUNT:
-        logging.info("Reconnecting in %d seconds...", reconnect_delay)
+        print("Reconnecting in %d seconds...", reconnect_delay)
         time.sleep(reconnect_delay)
 
         try:
             client.reconnect()
-            logging.info("Reconnected successfully!")
+            print("Reconnected successfully!")
             return
         except Exception as err:
-            logging.error("%s. Reconnect failed. Retrying...", err)
+            print("%s. Reconnect failed. Retrying...", err)
 
         reconnect_delay *= RECONNECT_RATE
         reconnect_delay = min(reconnect_delay, MAX_RECONNECT_DELAY)
         reconnect_count += 1
-    logging.info("Reconnect failed after %s attempts. Exiting...", reconnect_count)
+    print("Reconnect failed after %s attempts. Exiting...", reconnect_count)
 
 def publish(client, spell):
     global topic
@@ -151,6 +151,15 @@ def capture_frame():
     cv2.flip(frame,1,frame)
     return frame
 
+def adjust_contrast_brightness(img, contrast:float=1.0, brightness:int=0):
+    """
+    Adjusts contrast and brightness of an uint8 image.
+    contrast:   (0.0,  inf) with 1.0 leaving the contrast as is
+    brightness: [-255, 255] with 0 leaving the brightness as is
+    """
+    brightness += int(round(255*(1-contrast)/2))
+    return cv2.addWeighted(img, contrast, img, 0, brightness)
+
 def gen_frame_gray(frame):
     # Mask detection area if dmask is defined
 
@@ -160,11 +169,12 @@ def gen_frame_gray(frame):
     frame_gray = cv2.GaussianBlur(frame_gray,blur_params,1.5)
     dilate_kernel = np.ones(dilation_params, np.uint8)
     frame_gray = cv2.dilate(frame_gray, dilate_kernel, iterations=1)
-    #frame_clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-    #frame_gray = frame_clahe.apply(frame_gray)
-    dmask = np.zeros_like(frame_gray)
-    cv2.rectangle(dmask,(300,220),(680,320),255,cv2.FILLED)
-    frame_gray = cv2.bitwise_and(frame_gray,dmask)
+    frame_gray = adjust_contrast_brightness(frame_gray,contrast=1.1)
+    # frame_clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+    # frame_gray = frame_clahe.apply(frame_gray)
+    # dmask = np.zeros_like(frame_gray)
+    # cv2.rectangle(dmask,(300,220),(680,320),255,cv2.FILLED)
+    # frame_gray = cv2.bitwise_and(frame_gray,dmask)
     return frame_gray
 
 def wand_overlay(f,points):
@@ -175,6 +185,11 @@ def wand_overlay(f,points):
         cv2.putText(f2, str(i), (a,b), cv2.FONT_HERSHEY_SIMPLEX, 1.0, POINT_COLOR)
     return f2
 
+def points_exist(points):
+    if points is not None:
+        if len(points) > 0:
+            return True
+    return False
 
 def FindWand():
     global p0, cam, mask, ig
@@ -183,7 +198,7 @@ def FindWand():
         frame = capture_frame()
         frame_gray = gen_frame_gray(frame)
         p0 = cv2.HoughCircles(frame_gray,cv2.HOUGH_GRADIENT,3,50,param1=340,param2=4,minRadius=3,maxRadius=15)
-        if len(p0) > 0:
+        if points_exist(p0):
             p0.shape = (p0.shape[1], 1, p0.shape[2])
             p0 = p0[:,:,0:2]
             adj_index=0
@@ -193,9 +208,9 @@ def FindWand():
                     p0 = np.delete(p0,i-adj_index,0)
                     adj_index=adj_index+1
             ig = [[0] for x in range(20)]
-        mask = np.zeros_like(frame_gray)
+        mask = np.zeros_like(frame)
         end = time.time()
-        #print(f"FindWand Completed in {end - start} seconds.")
+        print(f"FindWand Completed in {end - start} seconds.")
         threading.Timer(3, FindWand).start()
     except:
         e = sys.exc_info()[1]
@@ -211,7 +226,7 @@ def TrackWand():
             start = time.time()
             frame = capture_frame()
             frame_gray = gen_frame_gray(frame)
-            if old_gray is not None and len(p0) > 0:
+            if old_gray is not None and points_exist(p0):
                 p1, st, _ = cv2.calcOpticalFlowPyrLK(old_gray, frame_gray, p0, None, **lk_params)
                 # p2 = cv2.HoughCircles(old_gray,cv2.HOUGH_GRADIENT,3,50,param1=240,param2=30,minRadius=4,maxRadius=10)
                 # p2 = p2[:,:,0:2]
@@ -237,24 +252,22 @@ def TrackWand():
                     dist = math.hypot(a - c, b - d)
                     if (dist>movment_threshold):
                         cv2.line(mask, (a,b),(c,d),(0,255,0), 2)
-                        if (i<10):
-                            IsGesture(a,b,c,d,i)
-                    cv2.circle(frame_gray,(a,b),5,POINT_COLOR,-1)
-                    cv2.putText(frame_gray, str(i), (a,b), cv2.FONT_HERSHEY_SIMPLEX, 1.0, POINT_COLOR) 
+                        IsGesture(a,b,c,d,i)
+                    cv2.circle(frame,(a,b),5,POINT_COLOR,-1)
+                    cv2.putText(frame, str(i), (a,b), cv2.FONT_HERSHEY_SIMPLEX, 1.0, POINT_COLOR) 
                 p0 = good_new.reshape(-1,1,2)
-            
-            img = cv2.add(frame_gray,mask)
+            img = cv2.add(frame,mask)
                 #cv2.putText(img, "Press ESC to close.", (5, 25),
                 #    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,255))
                 #cv2.imshow("img",img)
                 
             #cv2.imshow("Raspberry Potter", frame)
             cv2.imshow("Raspberry Potter", img)
-
             # Now update the previous frame and previous points
             old_gray = frame_gray.copy()
+            cv2.imshow("FrameGray", frame_gray)
             end = time.time()
-            #print(f"TrackWand Completed in {end - start} seconds.")
+            print(f"TrackWand Completed in {end - start} seconds.")
         except IndexError:
             print("Index error - Tracking")  
         except:
