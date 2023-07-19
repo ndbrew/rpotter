@@ -1,0 +1,4 @@
+python-dotenv
+picamera2
+imutils
+paho-mqtt
