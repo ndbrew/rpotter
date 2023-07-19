@@ -47,6 +47,8 @@ movment_threshold = 10
 CAM_W_RES=640
 CAM_H_RES=480
 
+POINT_COLOR=(0,0,255)
+
 ig = [[0] for x in range(20)]
 
 warnings.filterwarnings("ignore", category=np.VisibleDeprecationWarning)
@@ -83,7 +85,8 @@ def on_disconnect(client, userdata, rc):
         reconnect_count += 1
     logging.info("Reconnect failed after %s attempts. Exiting...", reconnect_count)
 
-def publish(client, topic, spell):
+def publish(client, spell):
+    global topic
     result = client.publish(topic, spell)
     # result: [0, 1]
     status = result[0]
@@ -115,7 +118,6 @@ def Spell(spell):
     cv2.putText(frame, spell, (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2)
 
 def IsGesture(a,b,c,d,i):
-    print("point: %s" % i)
     #look for basic movements - TODO: trained gestures
     if ((a<(c-5))&(abs(b-d)<2)):
         ig[i].append("left")
@@ -140,51 +142,74 @@ def IsGesture(a,b,c,d,i):
     #     Spell("Aguamenti")
     if len(ig[i]) > 10:
         ig[i]=[]    
-    print(astr)
-        
+    #print(astr)
+
+def print_wand_movement():
+    global ig
+    os.system('clear')
+    for i,igg in enumerate(ig):
+        astr = ''.join(map(str,igg))
+        print(f"point {str(i)}: {astr}")
+    threading.Timer(.2, print_wand_movement).start()
+
 def capture_frame():
     _, frame = cam.read()
     cv2.flip(frame,1,frame)
+    return frame
+
+def gen_frame_gray(frame):
     # Mask detection area if dmask is defined
-#    mask = np.zeros_like(frame)
-#    cv2.rectangle(dmask,(300,200),(680,300),255,cv2.FILLED)
-#    frame_gray = cv2.bitwise_and(frame,dmask)
+
     #frame_gray = decrease_brightness(frame_gray, value=30)
-    frame_gray = cv2.cvtColor(frame_gray, cv2.COLOR_BGR2GRAY)
-    equalizeHist(frame_gray)
-    frame_gray = GaussianBlur(frame_gray,(9,9),1.5)
+    frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    cv2.equalizeHist(frame_gray)
+    frame_gray = cv2.GaussianBlur(frame_gray,(9,9),1.5)
     dilate_kernel = np.ones(dilation_params, np.uint8)
     frame_gray = cv2.dilate(frame_gray, dilate_kernel, iterations=1)
     frame_clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
     frame_gray = frame_clahe.apply(frame_gray)
-    return frame,frame_gray
+    dmask = np.zeros_like(frame_gray)
+    cv2.rectangle(dmask,(300,220),(680,320),255,cv2.FILLED)
+    frame_gray = cv2.bitwise_and(frame_gray,dmask)
+    return frame_gray
 
-def FindWand(cam):
+def wand_overlay(frame,points):
+    for i,p in enumerate(points):
+        a,b = p.ravel()
+        cv2.circle(frame,(a,b),5,POINT_COLOR,-1)
+        cv2.putText(frame, str(i), (a,b), cv2.FONT_HERSHEY_SIMPLEX, 1.0, POINT_COLOR)
+    return frame
+
+def FindWand():
+    global p0, cam, mask, ig
     try:
-        frame, frame_gray = capture_frame(cam)
+        frame = capture_frame()
+        frame_gray = gen_frame_gray(frame)
         p0 = cv2.HoughCircles(frame_gray,cv2.HOUGH_GRADIENT,3,50,param1=240,param2=8,minRadius=3,maxRadius=15)
         if p0 is not None:
+            print("Points Found")
             p0.shape = (p0.shape[1], 1, p0.shape[2])
             p0 = p0[:,:,0:2]
-            # Generate empty mask
-            mask = np.zeros_like(old_frame)
+            ig = [[0] for x in range(20)]
+            mask = np.zeros_like(frame)
         print("finding...")
-        cv2.imshow("FindWand",frame)
-        cv2.imshow("FindWandGray",frame_gray)
         threading.Timer(5, FindWand).start()
-        return p0, mask
     except:
         e = sys.exc_info()[1]
         print("Error: %s" % e) 
         exit
 
-def TrackWand(cam):
-        frame, frame_gray = capture_fram(cam)
-
-        while True:
-            try:
-                frame, frame_gray = capture_frame(cam)
-                if p0 is not None:
+def TrackWand():
+    global cam, p0, mask
+    FindWand()
+    print_wand_movement()
+    old_gray = None
+    while True:
+        try:
+            if p0 is not None:
+                frame = capture_frame()
+                frame_gray = gen_frame_gray(frame)
+                if old_gray is not None:
                     p1, st, err = cv2.calcOpticalFlowPyrLK(old_gray, frame_gray, p0, None, **lk_params)
                     # p2 = cv2.HoughCircles(old_gray,cv2.HOUGH_GRADIENT,3,50,param1=240,param2=30,minRadius=4,maxRadius=10)
                     # p2 = p2[:,:,0:2]
@@ -211,49 +236,53 @@ def TrackWand(cam):
                         dist = math.hypot(a - c, b - d)
                         if (dist<movment_threshold):
                             cv2.line(mask, (a,b),(c,d),(0,255,0), 2)
-                        cv2.circle(frame,(a,b),5,color,-1)
-                        cv2.putText(frame, str(i), (a,b), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,0,255)) 
+                        cv2.circle(frame,(a,b),5,POINT_COLOR,-1)
+                        cv2.putText(frame, str(i), (a,b), cv2.FONT_HERSHEY_SIMPLEX, 1.0, POINT_COLOR) 
                     img = cv2.add(frame,mask)
                     cv2.putText(img, "Press ESC to close.", (5, 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,255))
                     cv2.imshow("img",img)
-                #cv2.imshow("Raspberry Potter", frame)
+                    p0 = good_new.reshape(-1,1,2)
+                cv2.imshow("Raspberry Potter", frame)
                 cv2.imshow("Frame Gray", frame_gray)
 
                 # Now update the previous frame and previous points
                 old_gray = frame_gray.copy()
-                p0 = good_new.reshape(-1,1,2)
-            except IndexError:
-                print("Index error - Tracking")  
-            except:
-                e = sys.exc_info()[0]
-                #print("Tracking Error: %s" % e)
+            
+        except IndexError:
+            print("Index error - Tracking")  
+        except:
+            e = sys.exc_info()[0]
+            #print("Tracking Error: %s" % e)
 
-            key = cv2.waitKey(20)
-            if key in [27, ord('Q'), ord('q')]: # exit on ESC
-                # cv2.destroyAllWindows()
-                cam.release()
-                break
+        key = cv2.waitKey(20)
+        if key in [27, ord('Q'), ord('q')]: # exit on ESC
+            # cv2.destroyAllWindows()
+            cam.release()
+            break
+
+# Setup Global Camera
+cam = cv2.VideoCapture(-1)
+cam.set(3, CAM_W_RES)
+cam.set(4, CAM_H_RES)
 
 try:
     load_dotenv()
+    global topic
     topic = os.getenv('TOPIC')
     broker = os.getenv('BROKER')
-    port = os.getenv('PORT')
+    port = int(os.getenv('PORT'))
 
     print("Initializing mqtt client")
     client = connect_mqtt(broker, port)
     client.on_disconnect = on_disconnect
 
     print("Initializing Camera")
-    cam = cv2.VideoCapture(-1)
-    cam.set(3, CAM_W_RES)
-    cam.set(4, CAM_H_RES)
+
     
     print("Initializing point tracking")
-    FindWand(cam)
-    #TrackWand(cam)  
-finally:   
+    TrackWand()
+finally:
     cam.release()
  
 
